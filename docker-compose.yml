@@ -1,0 +1,26 @@
+version: "3.9"
+services:
+  frontend:
+    build: ./frontend
+    ports: ["3000:80"]
+    depends_on: [api]
+    restart: unless-stopped
+    
+  api:
+    build: ./api
+    env_file: .env
+    volumes: ["./api:/app"]
+    ports: ["8000:8000"]
+    depends_on: [redis]
+    restart: unless-stopped
+    
+  worker:
+    build: ./worker
+    env_file: .env
+    volumes: ["./worker:/app"]
+    depends_on: [redis]
+    restart: unless-stopped
+    
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped

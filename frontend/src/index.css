@@ -1,0 +1,160 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* MicroSaaS Design System - Professional theme with environment variable support
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    /* Theme: Default (Purple/Blue) - Professional SaaS look */
+    --background: 0 0% 100%;
+    --foreground: 224 71% 4%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 224 71% 4%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 224 71% 4%;
+
+    /* Primary brand colors - Purple/Blue gradient theme */
+    --primary: 262 83% 58%;
+    --primary-foreground: 210 40% 98%;
+    --primary-glow: 258 90% 66%;
+    --primary-dark: 262 83% 48%;
+
+    --secondary: 220 14.3% 95.9%;
+    --secondary-foreground: 220.9 39.3% 11%;
+
+    --muted: 220 14.3% 95.9%;
+    --muted-foreground: 220 8.9% 46.1%;
+
+    --accent: 220 14.3% 95.9%;
+    --accent-foreground: 220.9 39.3% 11%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 262 83% 58%;
+
+    --radius: 0.75rem;
+
+    /* Custom MicroSaaS tokens */
+    --hero-gradient: linear-gradient(135deg, hsl(262 83% 58%), hsl(258 90% 66%));
+    --hero-gradient-dark: linear-gradient(135deg, hsl(262 83% 48%), hsl(258 90% 56%));
+    --surface-gradient: linear-gradient(145deg, hsl(0 0% 100%), hsl(220 14% 97%));
+    --glow-primary: 0 0 40px hsl(262 83% 58% / 0.2);
+    --glow-intense: 0 0 60px hsl(262 83% 58% / 0.4);
+    
+    /* Animation tokens */
+    --transition-smooth: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    --transition-bounce: all 0.5s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+    
+    /* Typography */
+    --font-heading: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-body: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+
+    --sidebar-background: 0 0% 98%;
+
+    --sidebar-foreground: 240 5.3% 26.1%;
+
+    --sidebar-primary: 240 5.9% 10%;
+
+    --sidebar-primary-foreground: 0 0% 98%;
+
+    --sidebar-accent: 240 4.8% 95.9%;
+
+    --sidebar-accent-foreground: 240 5.9% 10%;
+
+    --sidebar-border: 220 13% 91%;
+
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+
+  /* Alternative theme: Green/Teal - Can be activated via environment variable */
+  .theme-green {
+    --primary: 162 78% 51%;
+    --primary-foreground: 210 40% 98%;
+    --primary-glow: 160 84% 39%;
+    --primary-dark: 162 78% 41%;
+    --hero-gradient: linear-gradient(135deg, hsl(162 78% 51%), hsl(160 84% 39%));
+    --hero-gradient-dark: linear-gradient(135deg, hsl(162 78% 41%), hsl(160 84% 29%));
+    --glow-primary: 0 0 40px hsl(162 78% 51% / 0.2);
+    --glow-intense: 0 0 60px hsl(162 78% 51% / 0.4);
+    --ring: 162 78% 51%;
+  }
+
+  /* Alternative theme: Orange/Red - Can be activated via environment variable */
+  .theme-orange {
+    --primary: 24 95% 53%;
+    --primary-foreground: 210 40% 98%;
+    --primary-glow: 20 91% 48%;
+    --primary-dark: 24 95% 43%;
+    --hero-gradient: linear-gradient(135deg, hsl(24 95% 53%), hsl(20 91% 48%));
+    --hero-gradient-dark: linear-gradient(135deg, hsl(24 95% 43%), hsl(20 91% 38%));
+    --glow-primary: 0 0 40px hsl(24 95% 53% / 0.2);
+    --glow-intense: 0 0 60px hsl(24 95% 53% / 0.4);
+    --ring: 24 95% 53%;
+  }
+
+  .dark {
+    --background: 224 71% 4%;
+    --foreground: 210 40% 98%;
+
+    --card: 224 71% 4%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 224 71% 4%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 258 90% 66%;
+    --primary-foreground: 224 71% 4%;
+    --primary-glow: 262 83% 58%;
+    --primary-dark: 258 90% 56%;
+
+    --secondary: 215 27.9% 16.9%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 215 27.9% 16.9%;
+    --muted-foreground: 217.9 10.6% 64.9%;
+
+    --accent: 215 27.9% 16.9%;
+    --accent-foreground: 210 40% 98%;
+
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 215 27.9% 16.9%;
+    --input: 215 27.9% 16.9%;
+    --ring: 258 90% 66%;
+
+    /* Dark theme gradients */
+    --hero-gradient: linear-gradient(135deg, hsl(258 90% 66%), hsl(262 83% 58%));
+    --hero-gradient-dark: linear-gradient(135deg, hsl(258 90% 56%), hsl(262 83% 48%));
+    --surface-gradient: linear-gradient(145deg, hsl(224 71% 4%), hsl(215 27.9% 16.9%));
+    --glow-primary: 0 0 40px hsl(258 90% 66% / 0.3);
+    --glow-intense: 0 0 60px hsl(258 90% 66% / 0.5);
+
+    --sidebar-background: 240 5.9% 10%;
+    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-primary: 258 90% 66%;
+    --sidebar-primary-foreground: 224 71% 4%;
+    --sidebar-accent: 240 3.7% 15.9%;
+    --sidebar-accent-foreground: 240 4.8% 95.9%;
+    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-ring: 258 90% 66%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+}
