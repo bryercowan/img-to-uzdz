@@ -22,15 +22,15 @@ export const HeroSection = () => {
       <div className="container mx-auto px-6 text-center relative z-10">
         {/* Main heading */}
         <h1 className="text-4xl md:text-6xl font-bold font-heading mb-6 leading-tight">
-          Micro SaaS Name
+          Generate USDZ 3D Models
           <span className="block text-primary text-3xl md:text-4xl mt-2">
-            For Target Market
+            From Product Images for Shopify AR
           </span>
         </h1>
 
         {/* Subheading */}
         <p className="text-lg md:text-xl text-muted-foreground max-w-2xl mx-auto mb-8">
-          Small descriptions on how it works, like uploading a file, editing and $3 payment away from fixing the problem.
+          Transform your product photos into professional USDZ 3D models for augmented reality shopping. Perfect for Shopify, WooCommerce, and any e-commerce platform. AI-powered analysis, instant preview, one-time $3 payment.
         </p>
 
         {/* CTA Button */}
@@ -42,16 +42,24 @@ export const HeroSection = () => {
         <div className="grid md:grid-cols-3 gap-6 text-center mt-12">
           <div className="flex items-center justify-center gap-2">
             <Zap className="w-5 h-5 text-primary" />
-            <span className="text-muted-foreground">speed hook</span>
+            <span className="text-muted-foreground">AR-Ready in Minutes</span>
           </div>
           <div className="flex items-center justify-center gap-2">
             <Sparkles className="w-5 h-5 text-primary" />
-            <span className="text-muted-foreground">No Subscription/Hook 2</span>
+            <span className="text-muted-foreground">AI Product Recognition</span>
           </div>
           <div className="flex items-center justify-center gap-2">
             <ArrowRight className="w-5 h-5 text-primary" />
-            <span className="text-muted-foreground">One Time Payment/No Signup/Hook 3</span>
+            <span className="text-muted-foreground">No Subscription Required</span>
           </div>
+        </div>
+
+        {/* SEO Keywords Section */}
+        <div className="mt-16 text-xs text-muted-foreground/60 max-w-4xl mx-auto">
+          <p>
+            Supports: Shopify AR, WooCommerce 3D, Magento AR, BigCommerce 3D models, iOS Safari AR, Android Chrome WebXR, 
+            USDZ file format, GLB to USDZ conversion, product visualization, e-commerce AR solutions
+          </p>
         </div>
       </div>
     </section>

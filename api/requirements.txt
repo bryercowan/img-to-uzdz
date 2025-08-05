@@ -7,3 +7,16 @@ rq
 stripe==9.3.0
 jinja2
 python-multipart
+google-cloud-vision
+pillow
+pillow-heif
+trimesh
+numpy
+sqlalchemy
+psycopg2-binary
+alembic
+bcrypt
+python-jose[cryptography]
+boto3
+opencv-python
+requests

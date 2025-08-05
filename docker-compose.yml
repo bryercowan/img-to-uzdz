@@ -11,16 +11,37 @@ services:
     env_file: .env
     volumes: ["./api:/app"]
     ports: ["8000:8000"]
-    depends_on: [redis]
+    depends_on: [postgres, redis]
     restart: unless-stopped
     
   worker:
     build: ./worker
     env_file: .env
     volumes: ["./worker:/app"]
-    depends_on: [redis]
+    depends_on: [postgres, redis]
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: imgto3d
+      POSTGRES_USER: imgto3d
+      POSTGRES_PASSWORD: password123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports: ["5432:5432"]
     restart: unless-stopped
     
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    
+volumes:
+  postgres_data:
