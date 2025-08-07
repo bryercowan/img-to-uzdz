@@ -1,11 +1,12 @@
-from fastapi import FastAPI, UploadFile, Request, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import stripe, uuid, redis, json, os
-from settings import Settings
-from tasks import save_files, validate_images, process_images_for_usdz
+from typing import List, Dict, Any
+from pydantic import BaseModel, Field 
+from PIL import Image
+from datetime import datetime
+import boto3, uuid, os, mimetypes, pillow_heif, io
 
-app = FastAPI()
+app = FastAPI(title="3D Model Generation API (Minimal)")
 
 app.add_middleware(
     CORSMiddleware,
@@ -15,167 +16,138 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-settings = Settings()
-stripe.api_key = settings.STRIPE_SECRET_KEY
-r = redis.from_url(settings.REDIS_URL, decode_responses=True)
+r2 = boto3.client(
+    "s3",
+    endpoint_url=os.environ["S3_ENDPOINT"],
+    aws_access_key_id=os.environ["S3_ACCESS_KEY"],
+    aws_secret_access_key=os.environ["S3_SECRET_KEY"],
+    region_name=os.environ.get("S3_REGION", "auto"),  # R2 ignores region
+)
+BUCKET = os.environ["R2_BUCKET"]
 
-@app.post("/upload")
-async def upload(request: Request, files: list[UploadFile]):
-    try:
-        if not files:
-            raise HTTPException(400, "No files uploaded")
-        
-        # Validate uploaded images
-        if not validate_images(files):
-            raise HTTPException(400, "Invalid files. Please upload 3-6 images (JPG, PNG, WEBP, HEIC) under 10MB each")
-        
-        job_id = uuid.uuid4().hex
-        tmp_dir = save_files(files, job_id)
-        
-        # Process images immediately for preview
-        processing_result = process_images_for_usdz(tmp_dir)
-        
-        if "error" in processing_result:
-            raise HTTPException(500, f"Processing error: {processing_result['error']}")
-        
-        # Store job data in Redis
-        job_data = {
-            "status": "processed",
-            "dir": tmp_dir,
-            "usdz_file": processing_result["usdz_file"],
-            "usdz_path": processing_result["usdz_path"],
-            "vision_data": json.dumps(processing_result["vision_data"]),
-            "ar_metadata": json.dumps(processing_result["ar_metadata"]),
-            "file_size": str(processing_result["file_size"])
-        }
-        r.hset(f"job:{job_id}", mapping=job_data)
-        
-        session = stripe.checkout.Session.create(
-            mode="payment",
-            line_items=[{"price": settings.STRIPE_PRICE_ID, "quantity": 1}],
-            success_url=f"{settings.BASE_URL}/success?session_id={{CHECKOUT_SESSION_ID}}",
-            cancel_url=f"{settings.BASE_URL}/",
-            metadata={"job_id": job_id}
+class PreReq(BaseModel):
+    filenames: list[str] = Field(..., min_length=1)
+    content_types: list[str] = Field(..., min_length=1)
+    account: str = "anon"
+
+# Store preview tokens and their status (in-memory for demo)
+preview_store = {}
+
+
+@app.post("/uploads/presign")
+async def presign(req: PreReq):
+    if len(req.filenames) != len(req.content_types):
+        raise HTTPException(400, "filenames & content_types mismatch")
+
+    job_id  = f"job_{uuid.uuid4().hex[:8]}"
+    keys = []
+
+    for name, ctype in zip(req.filenames, req.content_types):
+        key = f"raw/{req.account}/{job_id}/{name}"
+        put = r2.generate_presigned_url(
+            "put_object",
+            Params={"Bucket": BUCKET,
+                    "Key": key,
+                    "ContentType": ctype or mimetypes.guess_type(name)[0]
+                                                    or "application/octet-stream"},
+            ExpiresIn=900,
         )
+        keys.append({"key": key, "put": put})
+
+    return {"jobId": job_id, "presigned": keys}
+
+class CompleteReq(BaseModel):
+    account: str
+    job_id: str
+    keys: list[str] = Field(..., min_length=1)
+
+@app.post("/uploads/complete")
+def complete(req: CompleteReq):
+    prefix = f"raw/{req.account}/{req.job_id}/"
+    if not all(k.startswith(prefix) for k in req.keys):
+        raise HTTPException(400, "invalid keys")
+
+    if len(req.keys) < 6:
+        raise HTTPException(400, "Need at least 6 images")
+
+    for key in req.keys:
+        obj = r2.get_object(Bucket=BUCKET, Key=key)   
+        blob = obj["Body"].read(512_000)              
+        Image.open(io.BytesIO(blob)).verify()
+
+    return {"ok": True}
+
+@app.post("/jobs/preview")
+async def preview_job(request: Dict[str, Any]):
+    """Create a preview job and return token"""
+    preview_token = str(uuid.uuid4())
+    
+    # Store the preview with initial status
+    preview_store[preview_token] = {
+        "status": "processing",
+        "created_at": datetime.utcnow(),
+        "images": request.get("images", [])
+    }
+
+    return {
+        "ok": True,
+        "warnings": [],
+        "preview_token": preview_token,
+        "estimate_credits": "0.0",
+        "estimate_minutes": 3
+    }
+
+@app.get("/preview/{preview_token}/status")
+async def get_preview_status(preview_token: str):
+    """Return preview status - simulate processing then completion"""
+    
+    if preview_token not in preview_store:
+        raise HTTPException(status_code=404, detail="Preview not found")
+    
+    preview = preview_store[preview_token]
+    
+    # Simulate: after 10 seconds, mark as completed
+    elapsed = (datetime.utcnow() - preview["created_at"]).total_seconds()
+    
+    if elapsed > 10:  # 10 seconds for demo
+        # Mark as completed with dummy model URL
+        preview["status"] = "completed" 
+        model_url = f"https://img3d-storage.f83a62cd873c7d3f751c493e9ae9db58.r2.cloudflarestorage.com/models/{preview_token}/preview.glb"
+        
         return {
-            "checkout_url": session.url,
-            "job_id": job_id,
+            "preview_token": preview_token,
+            "status": "completed",
+            "created_at": preview["created_at"].isoformat(),
+            "completed_at": datetime.utcnow().isoformat(),
+            "preview_url": model_url,
             "preview_data": {
-                "product_name": processing_result["vision_data"].get("product_name"),
-                "tags": processing_result["vision_data"].get("tags", [])[:5],
-                "file_size": processing_result["file_size"]
+                "outputs": [
+                    {
+                        "format": "glb",
+                        "url": model_url,
+                        "size_bytes": 1024000
+                    }
+                ],
+                "processing_time": f"{int(elapsed)}s"
             }
         }
-    except stripe.error.StripeError as e:
-        raise HTTPException(400, f"Stripe error: {str(e)}")
-    except Exception as e:
-        raise HTTPException(500, f"Server error: {str(e)}")
-
-@app.post("/webhook")
-async def webhook(request: Request):
-    sig = request.headers.get("stripe-signature")
-    if not sig:
-        raise HTTPException(400, "Missing stripe signature")
-    
-    payload = await request.body()
-    try:
-        event = stripe.Webhook.construct_event(payload, sig, settings.STRIPE_WEBHOOK_SECRET)
-    except stripe.error.SignatureVerificationError:
-        raise HTTPException(400, "Invalid signature")
-    except Exception as e:
-        raise HTTPException(400, f"Webhook error: {str(e)}")
-    
-    if event["type"] == "checkout.session.completed":
-        sess = event["data"]["object"]
-        job_id = sess.get("metadata", {}).get("job_id")
-        if job_id:
-            r.hset(f"job:{job_id}", "paid", "1")
-    return {"received": True}
-
-@app.get("/result")
-async def result(session_id: str):
-    try:
-        session = stripe.checkout.Session.retrieve(session_id)
-        job_id = session.get("metadata", {}).get("job_id")
-        if not job_id:
-            raise HTTPException(404, "Job not found")
-        
-        data = r.hgetall(f"job:{job_id}")
-        if not data:
-            raise HTTPException(404, "Job not found")
-        
-        # Check if payment was completed
-        if data.get("paid") != "1":
-            return {"status": "awaiting_payment", "message": "Payment required to download"}
-        
-        # Return metadata for successful payment
+    else:
+        # Still processing
         return {
-            "status": "completed",
-            "preview_data": {
-                "product_name": json.loads(data.get("vision_data", "{}")).get("product_name"),
-                "tags": json.loads(data.get("vision_data", "{}")).get("tags", [])[:5],
-                "file_size": data.get("file_size")
-            },
-            "download_available": True
+            "preview_token": preview_token,
+            "status": "processing",
+            "created_at": preview["created_at"].isoformat(),
+            "completed_at": None
         }
-    except stripe.error.StripeError as e:
-        raise HTTPException(400, f"Stripe error: {str(e)}")
-    except Exception as e:
-        raise HTTPException(500, f"Server error: {str(e)}")
 
-@app.get("/preview/{job_id}")
-async def preview_model(job_id: str):
-    try:
-        data = r.hgetall(f"job:{job_id}")
-        if not data:
-            raise HTTPException(404, "Job not found")
-        
-        usdz_path = data.get("usdz_path")
-        if not usdz_path or not os.path.exists(usdz_path):
-            raise HTTPException(404, "File not found")
-        
-        # Create a GLB version for preview (browsers support GLB better than USDZ)
-        glb_path = usdz_path.replace('.usdz', '.glb')
-        if not os.path.exists(glb_path):
-            # If GLB doesn't exist, serve the USDZ as GLB (they're the same in our case)
-            glb_path = usdz_path
-        
-        return FileResponse(
-            path=glb_path,
-            filename="preview_model.glb",
-            media_type="model/gltf-binary"
-        )
-    except Exception as e:
-        raise HTTPException(500, f"Server error: {str(e)}")
+@app.post("/studio/checkout-session")
+async def create_studio_checkout_session(request: Dict[str, Any]):
+    """Create dummy Stripe checkout session"""
+    return {
+        "session_url": "https://checkout.stripe.com/pay/cs_test_dummy_session_for_3d_model",
+        "session_id": "cs_test_" + str(uuid.uuid4())
+    }
 
-@app.get("/download")
-async def download_usdz(session_id: str):
-    try:
-        session = stripe.checkout.Session.retrieve(session_id)
-        job_id = session.get("metadata", {}).get("job_id")
-        if not job_id:
-            raise HTTPException(404, "Job not found")
-        
-        data = r.hgetall(f"job:{job_id}")
-        if not data:
-            raise HTTPException(404, "Job not found")
-        
-        # Verify payment
-        if data.get("paid") != "1":
-            raise HTTPException(403, "Payment required")
-        
-        usdz_path = data.get("usdz_path")
-        if not usdz_path or not os.path.exists(usdz_path):
-            raise HTTPException(404, "File not found")
-        
-        usdz_filename = data.get("usdz_file", "product_model.usdz")
-        
-        return FileResponse(
-            path=usdz_path,
-            filename=usdz_filename,
-            media_type="model/vnd.usdz+zip"
-        )
-    except stripe.error.StripeError as e:
-        raise HTTPException(400, f"Stripe error: {str(e)}")
-    except Exception as e:
-        raise HTTPException(500, f"Server error: {str(e)}")
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

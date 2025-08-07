@@ -1,12 +1,2 @@
-python-dotenv
-redis
-rq
-boto3
-numpy
-opencv-python
-pillow
-trimesh
-torch
-torchvision
-nerfstudio
-
+fastapi
+uvicorn[standard]

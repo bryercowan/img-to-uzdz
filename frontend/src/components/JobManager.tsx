@@ -107,7 +107,7 @@ export function JobManager() {
       // 1. Get presigned URLs
       const filenames = selectedFiles.map(f => f.name);
       const contentTypes = selectedFiles.map(f => f.type);
-      const presignResponse = await apiService.getPresignedUrls(filenames, contentTypes);
+      const presignResponse = await apiService.getPresignedUrlsAuth(filenames, contentTypes);
       
       // 2. Upload files to S3
       for (let i = 0; i < selectedFiles.length; i++) {

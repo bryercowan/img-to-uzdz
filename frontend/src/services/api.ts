@@ -29,8 +29,14 @@ export interface PresignedUrl {
 }
 
 export interface PresignResponse {
-  urls: PresignedUrl[];
+  jobId: string,
+  presigned: { key: string, put: any }[],
 }
+export interface UploadComplete {
+  ok: boolean;
+  warnings: string[];
+}
+
 
 export interface JobPreviewResponse {
   ok: boolean;
@@ -141,14 +147,14 @@ class ApiService {
         ...options?.headers,
       },
     });
-    
+
     if (!response.ok) {
-      const error = await response.json().catch(() => ({ 
-        error: { message: 'Unknown error' } 
+      const error = await response.json().catch(() => ({
+        error: { message: 'Unknown error' }
       }));
       throw new Error(error.error?.message || `HTTP ${response.status}`);
     }
-    
+
     return response;
   }
 
@@ -192,7 +198,7 @@ class ApiService {
     if (!this.isAuthenticated()) {
       return null;
     }
-    
+
     try {
       const response = await this.fetchWithError(`${API_BASE_URL}/auth/me`);
       return response.json();
@@ -226,6 +232,16 @@ class ApiService {
     return response.json();
   }
 
+  // API tier flow (auth required)
+  async getPresignedUrlsAuth(filenames: string[], contentTypes: string[]): Promise<PresignResponse> {
+    const response = await this.fetchWithError(`${API_BASE_URL}/uploads/presign`, {
+      method: 'POST',
+      body: JSON.stringify({ filenames, content_types: contentTypes }),
+    });
+
+    return response.json();
+  }
+
   async uploadToPresignedUrl(presignedUrl: string, file: File): Promise<void> {
     const response = await fetch(presignedUrl, {
       method: 'PUT',
@@ -249,17 +265,78 @@ class ApiService {
     return response.json();
   }
 
-  async createStudioCheckout(previewToken: string, successUrl?: string, cancelUrl?: string): Promise<CheckoutSessionResponse> {
-    const response = await this.fetchWithError(`${API_BASE_URL}/billing/stripe/checkout-session`, {
+  async uploadsComplete(jobId: string,): Promise<UploadComplete> {
+    const response = await this.fetchWithError(`${API_BASE_URL}/uploads/complete`, {
       method: 'POST',
-      body: JSON.stringify({ 
-        preview_token: previewToken,
-        success_url: successUrl,
-        cancel_url: cancelUrl 
-      }),
+      body: JSON.stringify({ job_id: jobId, account: "anon" }),
     });
 
     return response.json();
+  }
+
+
+  async createStudioCheckout(previewToken: string, successUrl?: string, cancelUrl?: string): Promise<CheckoutSessionResponse> {
+    const response = await fetch(`${API_BASE_URL}/studio/checkout-session`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        preview_token: previewToken,
+        success_url: successUrl,
+        cancel_url: cancelUrl
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({
+        error: { message: 'Unknown error' }
+      }));
+      throw new Error(error.error?.message || `HTTP ${response.status}`);
+    }
+
+    return response.json();
+  }
+
+  // Preview status polling
+  async getPreviewStatus(previewToken: string): Promise<any> {
+    const response = await fetch(`${API_BASE_URL}/preview/${previewToken}/status`);
+
+    if (!response.ok) {
+      throw new Error(`Failed to get preview status: ${response.status}`);
+    }
+
+    return response.json();
+  }
+
+  async pollPreviewStatus(previewToken: string, onUpdate: (status: any) => void, onComplete?: (result: any) => void): Promise<void> {
+    const poll = async () => {
+      try {
+        const status = await this.getPreviewStatus(previewToken);
+        onUpdate(status);
+
+        if (status.status === 'completed') {
+          onComplete?.(status);
+          return;
+        }
+
+        if (status.status === 'failed') {
+          console.error('Preview generation failed:', status.errors);
+          onComplete?.(status);
+          return;
+        }
+
+        // Continue polling if still processing
+        if (status.status === 'queued' || status.status === 'running') {
+          setTimeout(poll, 3000); // Poll every 3 seconds
+        }
+      } catch (error) {
+        console.error('Preview polling error:', error);
+        setTimeout(poll, 5000); // Retry after 5 seconds on error
+      }
+    };
+
+    poll();
   }
 
   // Studio result (legacy endpoint support)
@@ -381,12 +458,12 @@ class ApiService {
       try {
         const job = await this.getJob(jobId);
         onUpdate(job);
-        
+
         if (job.status === 'completed' || job.status === 'failed' || job.status === 'canceled') {
           onComplete?.(job);
           return;
         }
-        
+
         setTimeout(poll, 3000); // Poll every 3 seconds
       } catch (error) {
         console.error('Job polling error:', error);
@@ -397,37 +474,26 @@ class ApiService {
     poll();
   }
 
-  // Utility method for Studio upload flow
   async uploadFilesStudio(files: File[]): Promise<{ previewToken: string; checkoutUrl: string }> {
-    // 1. Get presigned URLs
     const filenames = files.map(f => f.name);
     const contentTypes = files.map(f => f.type);
-    const presignResponse = await this.getPresignedUrls(filenames, contentTypes);
-    
-    // 2. Upload files to S3
-    for (let i = 0; i < files.length; i++) {
-      await this.uploadToPresignedUrl(presignResponse.urls[i].put_url, files[i]);
-    }
-    
-    // 3. Create preview
-    const imageRefs = presignResponse.urls.map((url, i) => ({
-      url: url.key, // Use S3 key as URL
-      filename: filenames[i],
-    }));
-    
-    const preview = await this.previewJob(imageRefs);
-    
-    if (!preview.ok) {
-      throw new Error(`Validation failed: ${preview.warnings.join(', ')}`);
-    }
-    
-    // 4. Create checkout session
-    const checkout = await this.createStudioCheckout(preview.preview_token);
-    
-    return {
-      previewToken: preview.preview_token,
-      checkoutUrl: checkout.session_url,
-    };
+    const { jobId, presigned } = await this.getPresignedUrls(filenames, contentTypes);
+
+    await Promise.all(
+      files.map((f, i) =>
+        fetch(presigned[i].put, {
+          method: "PUT",
+          headers: { "Content-Type": contentTypes[i] },
+          body: f,
+        })
+      )
+    )
+
+    const res = await this.uploadsComplete(jobId);
+
+
+    return { previewToken: "FAKE", checkoutUrl: "FAKE" }
+
   }
 
   // Utility method for authenticated users to create jobs with files
@@ -439,21 +505,21 @@ class ApiService {
     // 1. Get presigned URLs
     const filenames = files.map(f => f.name);
     const contentTypes = files.map(f => f.type);
-    const presignResponse = await this.getPresignedUrls(filenames, contentTypes);
-    
+    const presignResponse = await this.getPresignedUrlsAuth(filenames, contentTypes);
+
     // 2. Upload files to S3
     for (let i = 0; i < files.length; i++) {
       await this.uploadToPresignedUrl(presignResponse.urls[i].put_url, files[i]);
     }
-    
+
     // 3. Create job
     const imageRefs = presignResponse.urls.map((url, i) => ({
-      url: url.key, // Use S3 key as URL
+      url: `https://f83a62cd873c7d3f751c493e9ae9db58.r2.cloudflarestorage.com/img3d-storage/${url.key}`, // Public R2 URL
       filename: filenames[i],
     }));
-    
+
     const jobCreate = await this.createJob(imageRefs, params);
-    
+
     // 4. Return full job details
     return {
       id: jobCreate.id,
