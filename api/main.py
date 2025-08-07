@@ -23,7 +23,7 @@ r2 = boto3.client(
     aws_secret_access_key=os.environ["S3_SECRET_KEY"],
     region_name=os.environ.get("S3_REGION", "auto"),  # R2 ignores region
 )
-BUCKET = os.environ["R2_BUCKET"]
+BUCKET = os.environ["S3_BUCKET"]
 
 class PreReq(BaseModel):
     filenames: list[str] = Field(..., min_length=1)
