@@ -265,10 +265,10 @@ class ApiService {
     return response.json();
   }
 
-  async uploadsComplete(jobId: string,): Promise<UploadComplete> {
+  async uploadsComplete(jobId: string, keys: string[]): Promise<UploadComplete & {job_id: string}> {
     const response = await this.fetchWithError(`${API_BASE_URL}/uploads/complete`, {
       method: 'POST',
-      body: JSON.stringify({ job_id: jobId, account: "anon" }),
+      body: JSON.stringify({ job_id: jobId, account: "anon", keys }),
     });
 
     return response.json();
@@ -479,6 +479,7 @@ class ApiService {
     const contentTypes = files.map(f => f.type);
     const { jobId, presigned } = await this.getPresignedUrls(filenames, contentTypes);
 
+    // Upload files to S3
     await Promise.all(
       files.map((f, i) =>
         fetch(presigned[i].put, {
@@ -489,10 +490,22 @@ class ApiService {
       )
     )
 
-    const res = await this.uploadsComplete(jobId);
+    // Complete the upload with the keys
+    const keys = presigned.map(p => p.key);
+    const res = await this.uploadsComplete(jobId, keys);
 
+    // Create preview job
+    const previewResult = await this.fetchWithError(`${API_BASE_URL}/jobs/preview`, {
+      method: 'POST',
+      body: JSON.stringify({ 
+        job_id: jobId, 
+        account: "anon" 
+      }),
+    });
+    
+    const previewData = await previewResult.json();
 
-    return { previewToken: "FAKE", checkoutUrl: "FAKE" }
+    return { previewToken: previewData.preview_token, checkoutUrl: "FAKE" }
 
   }
 

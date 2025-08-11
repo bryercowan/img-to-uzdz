@@ -4,7 +4,7 @@ from typing import List, Dict, Any
 from pydantic import BaseModel, Field 
 from PIL import Image
 from datetime import datetime
-import boto3, uuid, os, mimetypes, pillow_heif, io
+import boto3, uuid, os, mimetypes, pillow_heif, io, requests
 
 app = FastAPI(title="3D Model Generation API (Minimal)")
 
@@ -32,6 +32,60 @@ class PreReq(BaseModel):
 
 # Store preview tokens and their status (in-memory for demo)
 preview_store = {}
+
+# RunPod configuration
+RUNPOD_API_KEY = os.environ.get("RUNPOD_API_KEY")
+RUNPOD_ENDPOINT_ID = os.environ.get("RUNPOD_ENDPOINT_ID")
+
+def trigger_runpod_job(job_id: str, preview_token: str, account: str = "anon"):
+    """Trigger RunPod serverless job for 3D model generation"""
+    if not RUNPOD_API_KEY or not RUNPOD_ENDPOINT_ID:
+        print("RunPod not configured, using simulation")
+        return None
+        
+    url = f"https://api.runpod.ai/v2/{RUNPOD_ENDPOINT_ID}/run"
+    
+    headers = {
+        "Authorization": f"Bearer {RUNPOD_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "input": {
+            "job_id": job_id,
+            "preview_token": preview_token,
+            "account": account
+        }
+    }
+    
+    try:
+        response = requests.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        result = response.json()
+        print(f"RunPod job triggered: {result}")
+        return result
+    except Exception as e:
+        print(f"Failed to trigger RunPod job: {e}")
+        return None
+
+def check_runpod_status(runpod_job_id: str):
+    """Check the status of a RunPod job"""
+    if not RUNPOD_API_KEY:
+        return None
+        
+    url = f"https://api.runpod.ai/v2/{RUNPOD_ENDPOINT_ID}/status/{runpod_job_id}"
+    
+    headers = {
+        "Authorization": f"Bearer {RUNPOD_API_KEY}"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        print(f"Failed to check RunPod status: {e}")
+        return None
 
 
 @app.post("/uploads/presign")
@@ -75,18 +129,28 @@ def complete(req: CompleteReq):
         blob = obj["Body"].read(512_000)              
         Image.open(io.BytesIO(blob)).verify()
 
-    return {"ok": True}
+    return {"ok": True, "job_id": req.job_id}
 
 @app.post("/jobs/preview")
 async def preview_job(request: Dict[str, Any]):
     """Create a preview job and return token"""
     preview_token = str(uuid.uuid4())
+    job_id = request.get("job_id")  # Should be passed from frontend
+    account = request.get("account", "anon")
+    
+    if not job_id:
+        raise HTTPException(400, "job_id is required")
+    
+    # Trigger RunPod job
+    runpod_result = trigger_runpod_job(job_id, preview_token, account)
     
     # Store the preview with initial status
     preview_store[preview_token] = {
         "status": "processing",
         "created_at": datetime.utcnow(),
-        "images": request.get("images", [])
+        "images": request.get("images", []),
+        "job_id": job_id,
+        "runpod_job_id": runpod_result.get("id") if runpod_result else None
     }
 
     return {
@@ -94,50 +158,110 @@ async def preview_job(request: Dict[str, Any]):
         "warnings": [],
         "preview_token": preview_token,
         "estimate_credits": "0.0",
-        "estimate_minutes": 3
+        "estimate_minutes": 5  # More realistic for NeRF processing
     }
 
 @app.get("/preview/{preview_token}/status")
 async def get_preview_status(preview_token: str):
-    """Return preview status - simulate processing then completion"""
+    """Return preview status - check RunPod job status"""
     
     if preview_token not in preview_store:
         raise HTTPException(status_code=404, detail="Preview not found")
     
     preview = preview_store[preview_token]
+    runpod_job_id = preview.get("runpod_job_id")
     
-    # Simulate: after 10 seconds, mark as completed
-    elapsed = (datetime.utcnow() - preview["created_at"]).total_seconds()
+    # If RunPod is not configured, return error
+    if not RUNPOD_API_KEY or not RUNPOD_ENDPOINT_ID:
+        raise HTTPException(status_code=503, detail="RunPod worker not configured")
     
-    if elapsed > 10:  # 10 seconds for demo
-        # Mark as completed with dummy model URL
-        preview["status"] = "completed" 
-        model_url = f"https://img3d-storage.f83a62cd873c7d3f751c493e9ae9db58.r2.cloudflarestorage.com/models/{preview_token}/preview.glb"
+    # If no RunPod job ID, something went wrong during job creation
+    if not runpod_job_id:
+        return {
+            "preview_token": preview_token,
+            "status": "failed",
+            "created_at": preview["created_at"].isoformat(),
+            "completed_at": datetime.utcnow().isoformat(),
+            "errors": ["Failed to start processing job"]
+        }
+    
+    # Check RunPod job status
+    runpod_status = check_runpod_status(runpod_job_id)
+    
+    if not runpod_status:
+        return {
+            "preview_token": preview_token,
+            "status": "failed",
+            "created_at": preview["created_at"].isoformat(),
+            "completed_at": datetime.utcnow().isoformat(),
+            "errors": ["Failed to check job status"]
+        }
+    
+    job_status = runpod_status.get("status")
+    
+    if job_status == "COMPLETED":
+        # Get the output from RunPod
+        output = runpod_status.get("output", {})
+        
+        if output.get("status") == "completed" and output.get("preview_url"):
+            preview["status"] = "completed"
+            
+            return {
+                "preview_token": preview_token,
+                "status": "completed",
+                "created_at": preview["created_at"].isoformat(),
+                "completed_at": datetime.utcnow().isoformat(),
+                "preview_url": output["preview_url"],
+                "preview_data": output.get("preview_data", {
+                    "outputs": [{
+                        "format": "glb",
+                        "url": output["preview_url"],
+                        "size_bytes": output.get("size_bytes", 1024000)
+                    }],
+                    "processing_time": output.get("processing_time", "unknown")
+                })
+            }
+        else:
+            # RunPod completed but our handler failed
+            preview["status"] = "failed"
+            
+            return {
+                "preview_token": preview_token,
+                "status": "failed",
+                "created_at": preview["created_at"].isoformat(),
+                "completed_at": datetime.utcnow().isoformat(),
+                "errors": [output.get("error", "Processing completed but failed to generate model")]
+            }
+    
+    elif job_status == "FAILED":
+        preview["status"] = "failed"
+        error_message = runpod_status.get("error", "RunPod job failed")
         
         return {
             "preview_token": preview_token,
-            "status": "completed",
+            "status": "failed",
             "created_at": preview["created_at"].isoformat(),
             "completed_at": datetime.utcnow().isoformat(),
-            "preview_url": model_url,
-            "preview_data": {
-                "outputs": [
-                    {
-                        "format": "glb",
-                        "url": model_url,
-                        "size_bytes": 1024000
-                    }
-                ],
-                "processing_time": f"{int(elapsed)}s"
-            }
+            "errors": [error_message]
         }
-    else:
+    
+    elif job_status in ["IN_QUEUE", "IN_PROGRESS"]:
         # Still processing
         return {
             "preview_token": preview_token,
             "status": "processing",
             "created_at": preview["created_at"].isoformat(),
             "completed_at": None
+        }
+    
+    else:
+        # Unknown status
+        return {
+            "preview_token": preview_token,
+            "status": "failed",
+            "created_at": preview["created_at"].isoformat(),
+            "completed_at": datetime.utcnow().isoformat(),
+            "errors": [f"Unknown job status: {job_status}"]
         }
 
 @app.post("/studio/checkout-session")

@@ -1,2 +1,11 @@
 fastapi
 uvicorn[standard]
+runpod
+boto3
+nerfstudio==0.5.*
+torch
+torchvision
+torchaudio
+open3d
+numpy
+Pillow
