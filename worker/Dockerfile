@@ -36,7 +36,7 @@ RUN git clone https://github.com/colmap/colmap.git /tmp/colmap && \
     cd /tmp/colmap && \
     mkdir build && \
     cd build && \
-    cmake .. -GNinja -DCMAKE_CUDA_ARCHITECTURES=native && \
+    cmake .. -GNinja -DCMAKE_CUDA_ARCHITECTURES="70;75;80;86;89" && \
     ninja && \
     ninja install && \
     cd / && \
