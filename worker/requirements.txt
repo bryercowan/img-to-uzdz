@@ -2,7 +2,7 @@ fastapi
 uvicorn[standard]
 runpod
 boto3
-nerfstudio==0.5.*
+nerfstudio==1.1.5
 torch
 torchvision
 torchaudio
