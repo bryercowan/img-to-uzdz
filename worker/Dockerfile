@@ -11,6 +11,8 @@ RUN apt-get update && \
         git wget unzip bzip2 \
         ffmpeg libsm6 libxext6 \
         libglib2.0-0 libgl1-mesa-glx \
+        build-essential cmake \
+        libffi-dev libssl-dev \
         colmap && \
     rm -rf /var/lib/apt/lists/*
 
