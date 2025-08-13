@@ -130,11 +130,15 @@ def train_nerf_model(project_dir: str, preview_mode: bool = True) -> str:
     ]
     
     if preview_mode:
-        # Fast preview settings
+        # Ultra-fast preview settings (30 seconds - 2 minutes)
         train_cmd.extend([
-            "--max-num-iterations", "1000",  # Reduced iterations for preview
-            "--steps-per-eval-image", "200",
-            "--steps-per-save", "500"
+            "--max-num-iterations", "100",   # Minimal iterations for speed
+            "--steps-per-eval-image", "50",  # Less frequent evaluation
+            "--steps-per-save", "100",       # Save quickly
+            "--pipeline.model.num-proposal-samples-per-ray", "64",  # Reduced sampling
+            "--pipeline.model.num-nerf-samples-per-ray", "24",     # Reduced sampling
+            "--pipeline.datamanager.train-num-rays-per-batch", "1024",  # Smaller batches
+            "--viewer.quit-on-train-completion", "True"  # Don't start viewer
         ])
     
     logger.info(f"Running: {' '.join(train_cmd)}")
