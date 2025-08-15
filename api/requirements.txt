@@ -5,3 +5,4 @@ python-multipart
 pillow               
 pillow-heif
 redis
+requests

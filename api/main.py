@@ -4,7 +4,14 @@ from typing import List, Dict, Any
 from pydantic import BaseModel, Field 
 from PIL import Image
 from datetime import datetime
-import boto3, uuid, os, mimetypes, pillow_heif, io, requests
+import boto3, uuid, os, mimetypes, pillow_heif, io, requests, logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Register HEIF/HEIC support
+pillow_heif.register_heif_opener()
 
 app = FastAPI(title="3D Model Generation API (Minimal)")
 
@@ -125,9 +132,13 @@ def complete(req: CompleteReq):
         raise HTTPException(400, "Need at least 6 images")
 
     for key in req.keys:
-        obj = r2.get_object(Bucket=BUCKET, Key=key)   
-        blob = obj["Body"].read(512_000)              
-        Image.open(io.BytesIO(blob)).verify()
+        try:
+            obj = r2.get_object(Bucket=BUCKET, Key=key)   
+            blob = obj["Body"].read(512_000)              
+            Image.open(io.BytesIO(blob)).verify()
+        except Exception as e:
+            logger.error(f"Failed to validate image {key}: {e}")
+            raise HTTPException(400, f"Invalid image file: {key}")
 
     return {"ok": True, "job_id": req.job_id}
 
