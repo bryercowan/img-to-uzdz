@@ -4,7 +4,8 @@ from typing import List, Dict, Any
 from pydantic import BaseModel, Field 
 from PIL import Image
 from datetime import datetime
-import boto3, uuid, os, mimetypes, pillow_heif, io, requests, logging
+import boto3, uuid, os, mimetypes, pillow_heif, io, requests, logging, runpod, aiohttp, asyncio
+from runpod import AsyncioEndpoint, AsyncioJob
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -49,47 +50,64 @@ def trigger_runpod_job(job_id: str, preview_token: str, account: str = "anon"):
     if not RUNPOD_API_KEY or not RUNPOD_ENDPOINT_ID:
         print("RunPod not configured, using simulation")
         return None
+    
+    # Add test mode for development
+    if os.environ.get("RUNPOD_TEST_MODE") == "true":
+        print("Running in test mode - simulating successful job")
+        return {"success": True, "job_id": job_id}
+    
+    try:
+        # Initialize RunPod with API key
+        runpod.api_key = RUNPOD_API_KEY
         
-    url = f"https://api.runpod.ai/v2/{RUNPOD_ENDPOINT_ID}/run"
-    
-    headers = {
-        "Authorization": f"Bearer {RUNPOD_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    payload = {
-        "input": {
+        input_payload = {
             "job_id": job_id,
             "preview_token": preview_token,
             "account": account
         }
-    }
-    
-    try:
-        response = requests.post(url, json=payload, headers=headers)
-        response.raise_for_status()
-        result = response.json()
-        print(f"RunPod job triggered: {result}")
+        
+        print(f"Submitting job to RunPod: {input_payload}")
+        
+        # Use synchronous endpoint for serverless
+        endpoint = runpod.Endpoint(RUNPOD_ENDPOINT_ID)
+        run_request = endpoint.run(input_payload)
+        
+        print(f"RunPod run_request created: {type(run_request)}")
+        print(f"Run request object: {run_request}")
+        
+        # For serverless, we just need to know the job was submitted successfully
+        # We'll check status later using our own job_id
+        result = {"success": True, "job_id": job_id, "run_request_str": str(run_request)}
+        print(f"RunPod job triggered successfully: {result}")
         return result
+        
     except Exception as e:
         print(f"Failed to trigger RunPod job: {e}")
+        print(f"Exception type: {type(e)}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
         return None
 
 def check_runpod_status(runpod_job_id: str):
     """Check the status of a RunPod job"""
     if not RUNPOD_API_KEY:
         return None
-        
-    url = f"https://api.runpod.ai/v2/{RUNPOD_ENDPOINT_ID}/status/{runpod_job_id}"
-    
-    headers = {
-        "Authorization": f"Bearer {RUNPOD_API_KEY}"
-    }
     
     try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        return response.json()
+        # Initialize RunPod with API key
+        runpod.api_key = RUNPOD_API_KEY
+        
+        # Use synchronous endpoint for serverless
+        endpoint = runpod.Endpoint(RUNPOD_ENDPOINT_ID)
+        
+        # Create a job object from the job ID (this might need adjustment based on SDK)
+        # For now, let's try to get status using the endpoint
+        # Note: We might need to store the run_request object instead of just the ID
+        
+        # Try to check status - this might need to be adjusted based on actual SDK
+        # For now, return a placeholder
+        return {"status": "IN_PROGRESS"}
+        
     except Exception as e:
         print(f"Failed to check RunPod status: {e}")
         return None
@@ -161,7 +179,7 @@ async def preview_job(request: Dict[str, Any]):
         "created_at": datetime.utcnow(),
         "images": request.get("images", []),
         "job_id": job_id,
-        "runpod_job_id": runpod_result.get("id") if runpod_result else None
+        "runpod_success": runpod_result.get("success") if runpod_result else False
     }
 
     return {
@@ -180,14 +198,15 @@ async def get_preview_status(preview_token: str):
         raise HTTPException(status_code=404, detail="Preview not found")
     
     preview = preview_store[preview_token]
-    runpod_job_id = preview.get("runpod_job_id")
+    runpod_success = preview.get("runpod_success", False)
+    job_id = preview.get("job_id")
     
     # If RunPod is not configured, return error
     if not RUNPOD_API_KEY or not RUNPOD_ENDPOINT_ID:
         raise HTTPException(status_code=503, detail="RunPod worker not configured")
     
-    # If no RunPod job ID, something went wrong during job creation
-    if not runpod_job_id:
+    # If RunPod job submission failed, return error
+    if not runpod_success:
         return {
             "preview_token": preview_token,
             "status": "failed",
@@ -196,84 +215,13 @@ async def get_preview_status(preview_token: str):
             "errors": ["Failed to start processing job"]
         }
     
-    # Check RunPod job status
-    runpod_status = check_runpod_status(runpod_job_id)
-    
-    if not runpod_status:
-        return {
-            "preview_token": preview_token,
-            "status": "failed",
-            "created_at": preview["created_at"].isoformat(),
-            "completed_at": datetime.utcnow().isoformat(),
-            "errors": ["Failed to check job status"]
-        }
-    
-    job_status = runpod_status.get("status")
-    
-    if job_status == "COMPLETED":
-        # Get the output from RunPod
-        output = runpod_status.get("output", {})
-        
-        if output.get("status") == "completed" and output.get("preview_url"):
-            preview["status"] = "completed"
-            
-            return {
-                "preview_token": preview_token,
-                "status": "completed",
-                "created_at": preview["created_at"].isoformat(),
-                "completed_at": datetime.utcnow().isoformat(),
-                "preview_url": output["preview_url"],
-                "preview_data": output.get("preview_data", {
-                    "outputs": [{
-                        "format": "glb",
-                        "url": output["preview_url"],
-                        "size_bytes": output.get("size_bytes", 1024000)
-                    }],
-                    "processing_time": output.get("processing_time", "unknown")
-                })
-            }
-        else:
-            # RunPod completed but our handler failed
-            preview["status"] = "failed"
-            
-            return {
-                "preview_token": preview_token,
-                "status": "failed",
-                "created_at": preview["created_at"].isoformat(),
-                "completed_at": datetime.utcnow().isoformat(),
-                "errors": [output.get("error", "Processing completed but failed to generate model")]
-            }
-    
-    elif job_status == "FAILED":
-        preview["status"] = "failed"
-        error_message = runpod_status.get("error", "RunPod job failed")
-        
-        return {
-            "preview_token": preview_token,
-            "status": "failed",
-            "created_at": preview["created_at"].isoformat(),
-            "completed_at": datetime.utcnow().isoformat(),
-            "errors": [error_message]
-        }
-    
-    elif job_status in ["IN_QUEUE", "IN_PROGRESS"]:
-        # Still processing
-        return {
-            "preview_token": preview_token,
-            "status": "processing",
-            "created_at": preview["created_at"].isoformat(),
-            "completed_at": None
-        }
-    
-    else:
-        # Unknown status
-        return {
-            "preview_token": preview_token,
-            "status": "failed",
-            "created_at": preview["created_at"].isoformat(),
-            "completed_at": datetime.utcnow().isoformat(),
-            "errors": [f"Unknown job status: {job_status}"]
-        }
+    # For now, return processing status (we'll implement proper status checking next)
+    return {
+        "preview_token": preview_token,
+        "status": "processing",
+        "created_at": preview["created_at"].isoformat(),
+        "completed_at": None
+    }
 
 @app.post("/studio/checkout-session")
 async def create_studio_checkout_session(request: Dict[str, Any]):

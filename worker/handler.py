@@ -245,7 +245,8 @@ def upload_model_to_s3(model_path: str, preview_token: str) -> str:
 
 def handler(job):
     """Main RunPod handler function"""
-    logger.info(f"Processing job: {job}")
+    logger.info(f"NeRF Worker | Starting job {job.get('id', 'unknown')}")
+    logger.info(f"Job data: {job}")
     
     try:
         # Extract job parameters
@@ -257,30 +258,36 @@ def handler(job):
         if not job_id or not preview_token:
             return {"error": "Missing required parameters: job_id and preview_token"}
         
-        logger.info(f"Processing job_id: {job_id}, preview_token: {preview_token}")
+        logger.info(f"Processing job_id: {job_id}, preview_token: {preview_token}, account: {account}")
         
         # Step 1: Download images from S3
+        logger.info("Step 1: Downloading images from S3...")
         images_dir = download_images_from_s3(job_id, account)
         
         # Step 2: Setup nerfstudio project
+        logger.info("Step 2: Setting up nerfstudio project...")
         project_dir = setup_nerfstudio_project(images_dir)
         
         # Step 3: Train NeRF model (preview mode)
+        logger.info("Step 3: Training NeRF model (preview mode)...")
         output_dir = train_nerf_model(project_dir, preview_mode=True)
         
         # Step 4: Export model
+        logger.info("Step 4: Exporting model...")
         model_path = export_model(output_dir, preview_token)
         
         # Step 5: Upload model to S3
+        logger.info("Step 5: Uploading model to S3...")
         model_url = upload_model_to_s3(model_path, preview_token)
         
         # Clean up temporary directories
+        logger.info("Cleaning up temporary files...")
         shutil.rmtree(images_dir, ignore_errors=True)
         shutil.rmtree(project_dir, ignore_errors=True)
         
-        logger.info(f"Job completed successfully. Model URL: {model_url}")
+        logger.info(f"Job completed successfully! Model URL: {model_url}")
         
-        return {
+        job_output = {
             "status": "completed",
             "preview_url": model_url,
             "preview_data": {
@@ -295,13 +302,14 @@ def handler(job):
             }
         }
         
+        return job_output
+        
     except Exception as e:
         logger.error(f"Job failed with error: {str(e)}")
-        return {
-            "status": "failed",
-            "error": str(e)
-        }
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return {"error": str(e)}
 
-if __name__ == "__main__":
-    logger.info("Starting RunPod worker...")
-    runpod.serverless.start({"handler": handler})
+# Start the RunPod serverless worker
+logger.info("Starting RunPod serverless worker...")
+runpod.serverless.start({"handler": handler})
