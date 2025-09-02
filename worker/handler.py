@@ -1,76 +1,111 @@
-import runpod
-import boto3
+#!/usr/bin/env python3
+"""
+RunPod LB-only worker:
+- Exposes /ping and /generate over HTTP (FastAPI).
+- Converts incoming JSON into the job shape your existing handler(job) expects.
+"""
+
 import os
+import json
+import time
 import tempfile
 import subprocess
 import shutil
-import json
 import logging
 from pathlib import Path
-import zipfile
-import time
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+import boto3
+import runpod  # not used to start a queue worker; retained only for compatibility
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import uvicorn
+
+# ---------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-# S3/R2 Configuration
-s3_client = boto3.client(
-    "s3",
-    endpoint_url=os.environ["S3_ENDPOINT"],
-    aws_access_key_id=os.environ["S3_ACCESS_KEY"],
-    aws_secret_access_key=os.environ["S3_SECRET_KEY"],
-    region_name=os.environ.get("S3_REGION", "auto"),
-)
-BUCKET = os.environ["S3_BUCKET"]
+# ---------------------------------------------------------------------
+# Env + S3
+# ---------------------------------------------------------------------
+REQUIRED_ENV = ("S3_ENDPOINT", "S3_ACCESS_KEY", "S3_SECRET_KEY", "S3_BUCKET")
 
-def download_images_from_s3(job_id: str, account: str = "anon") -> str:
-    """Download all images for a job from S3 to a temporary directory"""
+def _require_env():
+    missing = [k for k in REQUIRED_ENV if not os.getenv(k)]
+    if missing:
+        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+
+# Lazily init S3 after we’ve ensured env is present
+def _init_s3():
+    s3_client = boto3.client(
+        "s3",
+        endpoint_url=os.environ["S3_ENDPOINT"],
+        aws_access_key_id=os.environ["S3_ACCESS_KEY"],
+        aws_secret_access_key=os.environ["S3_SECRET_KEY"],
+        region_name=os.environ.get("S3_REGION", "auto"),
+    )
+    return s3_client, os.environ["S3_BUCKET"]
+
+# ---------------------------------------------------------------------
+# Core pipeline helpers (unchanged logic, with small safety tweaks)
+# ---------------------------------------------------------------------
+def download_images_from_s3(s3_client, bucket: str, job_id: str, account: str = "anon") -> str:
+    """Download all images for a job from S3 to a temporary directory."""
+    import os
     temp_dir = tempfile.mkdtemp()
     prefix = f"raw/{account}/{job_id}/"
-    
+
     logger.info(f"Downloading images from S3 with prefix: {prefix}")
-    
-    response = s3_client.list_objects_v2(Bucket=BUCKET, Prefix=prefix)
-    
-    if 'Contents' not in response:
+
+    response = s3_client.list_objects_v2(Bucket=bucket, Prefix=prefix)
+
+    if "Contents" not in response:
         raise ValueError(f"No images found for job {job_id}")
-    
+
     image_count = 0
-    for obj in response['Contents']:
-        if obj['Key'].endswith(('.jpg', '.jpeg', '.png', '.webp')):
-            local_path = os.path.join(temp_dir, os.path.basename(obj['Key']))
-            s3_client.download_file(BUCKET, obj['Key'], local_path)
+    for obj in response["Contents"]:
+        key = obj["Key"]
+        if key.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+            local_path = os.path.join(temp_dir, os.path.basename(key))
+            s3_client.download_file(bucket, key, local_path)
             image_count += 1
-            logger.info(f"Downloaded: {obj['Key']} -> {local_path}")
-    
+            logger.info(f"Downloaded: {key} -> {local_path}")
+
+    if image_count == 0:
+        raise ValueError(f"No image files (.jpg/.jpeg/.png/.webp) found under {prefix}")
+
     logger.info(f"Downloaded {image_count} images to {temp_dir}")
     return temp_dir
 
+
 def setup_nerfstudio_project(images_dir: str) -> str:
-    """Setup nerfstudio project with COLMAP processing"""
+    """Setup nerfstudio project with COLMAP processing."""
+    import os
     project_dir = tempfile.mkdtemp()
     logger.info(f"Setting up nerfstudio project in {project_dir}")
-    
+
     # Create nerfstudio data directory structure
     data_dir = os.path.join(project_dir, "data")
     os.makedirs(data_dir, exist_ok=True)
-    
+
     # Copy images to data directory
     images_output = os.path.join(data_dir, "images")
     shutil.copytree(images_dir, images_output)
-    
+
     # Run COLMAP feature extraction and matching
     logger.info("Running COLMAP processing...")
-    
+
     # COLMAP automatic reconstruction
     cmd = [
         "colmap", "automatic_reconstructor",
         "--workspace_path", data_dir,
         "--image_path", images_output,
-        "--camera_model", "OPENCV"
+        "--camera_model", "OPENCV",
     ]
-    
+
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
         logger.info("COLMAP processing completed successfully")
@@ -78,92 +113,106 @@ def setup_nerfstudio_project(images_dir: str) -> str:
         logger.error(f"COLMAP failed: {e.stderr}")
         # Fallback: use simpler COLMAP processing
         logger.info("Attempting simplified COLMAP processing...")
-        
+
         sparse_dir = os.path.join(data_dir, "sparse")
         os.makedirs(sparse_dir, exist_ok=True)
-        
+
         # Feature extraction
-        subprocess.run([
-            "colmap", "feature_extractor",
-            "--database_path", os.path.join(data_dir, "database.db"),
-            "--image_path", images_output
-        ], check=True)
-        
+        subprocess.run(
+            [
+                "colmap", "feature_extractor",
+                "--database_path", os.path.join(data_dir, "database.db"),
+                "--image_path", images_output,
+            ],
+            check=True,
+        )
+
         # Feature matching
-        subprocess.run([
-            "colmap", "exhaustive_matcher",
-            "--database_path", os.path.join(data_dir, "database.db")
-        ], check=True)
-        
+        subprocess.run(
+            [
+                "colmap", "exhaustive_matcher",
+                "--database_path", os.path.join(data_dir, "database.db"),
+            ],
+            check=True,
+        )
+
         # Bundle adjustment
-        subprocess.run([
-            "colmap", "mapper",
-            "--database_path", os.path.join(data_dir, "database.db"),
-            "--image_path", images_output,
-            "--output_path", sparse_dir
-        ], check=True)
-    
+        subprocess.run(
+            [
+                "colmap", "mapper",
+                "--database_path", os.path.join(data_dir, "database.db"),
+                "--image_path", images_output,
+                "--output_path", sparse_dir,
+            ],
+            check=True,
+        )
+
     return project_dir
 
+
 def train_nerf_model(project_dir: str, preview_mode: bool = True) -> str:
-    """Train NeRF model using nerfstudio"""
+    """Train NeRF model using nerfstudio."""
+    import os
     logger.info("Starting NeRF training...")
-    
+
     data_dir = os.path.join(project_dir, "data")
     output_dir = os.path.join(project_dir, "outputs")
-    
+
     # Convert COLMAP data to nerfstudio format
     cmd = [
         "ns-process-data",
         "colmap",
         "--data", data_dir,
-        "--output-dir", data_dir
+        "--output-dir", data_dir,
     ]
-    
     subprocess.run(cmd, check=True)
-    
+
     # Train with nerfacto (fast preview mode)
     train_cmd = [
         "ns-train", "nerfacto",
         "--data", data_dir,
-        "--output-dir", output_dir
+        "--output-dir", output_dir,
     ]
-    
+
     if preview_mode:
-        # Ultra-fast preview settings (30 seconds - 2 minutes)
-        train_cmd.extend([
-            "--max-num-iterations", "100",   # Minimal iterations for speed
-            "--steps-per-eval-image", "50",  # Less frequent evaluation
-            "--steps-per-save", "100",       # Save quickly
-            "--pipeline.model.num-proposal-samples-per-ray", "64",  # Reduced sampling
-            "--pipeline.model.num-nerf-samples-per-ray", "24",     # Reduced sampling
-            "--pipeline.datamanager.train-num-rays-per-batch", "1024",  # Smaller batches
-            "--viewer.quit-on-train-completion", "True"  # Don't start viewer
-        ])
-    
+        # Ultra-fast preview settings
+        train_cmd.extend(
+            [
+                "--max-num-iterations", "100",
+                "--steps-per-eval-image", "50",
+                "--steps-per-save", "100",
+                "--pipeline.model.num-proposal-samples-per-ray", "64",
+                "--pipeline.model.num-nerf-samples-per-ray", "24",
+                "--pipeline.datamanager.train-num-rays-per-batch", "1024",
+                "--viewer.quit-on-train-completion", "True",
+            ]
+        )
+
     logger.info(f"Running: {' '.join(train_cmd)}")
     subprocess.run(train_cmd, check=True)
-    
+
     return output_dir
 
+
 def export_model(output_dir: str, preview_token: str) -> str:
-    """Export trained NeRF to GLB format using nerfstudio"""
+    """Export trained NeRF to GLB format using nerfstudio + Open3D."""
+    import os
     logger.info("Exporting NeRF model to GLB...")
-    
+
     # Find the latest experiment
-    experiments = [d for d in os.listdir(output_dir) if d.startswith('nerfacto')]
+    experiments = [d for d in os.listdir(output_dir) if d.startswith("nerfacto")]
     if not experiments:
         raise ValueError("No NeRF experiments found")
-    
+
     latest_exp = sorted(experiments)[-1]
     config_path = os.path.join(output_dir, latest_exp, "config.yml")
     export_dir = os.path.join(output_dir, "exports")
     os.makedirs(export_dir, exist_ok=True)
-    
+
     logger.info(f"Using config: {config_path}")
-    
-    # Export to mesh using nerfstudio's poisson export
+
     try:
+        # Export to mesh using nerfstudio's poisson export
         poisson_cmd = [
             "ns-export", "poisson",
             "--load-config", config_path,
@@ -172,51 +221,48 @@ def export_model(output_dir: str, preview_token: str) -> str:
             "--num-pixels-per-side", "2048",
             "--use-bounding-box", "True",
             "--bounding-box-min", "-1", "-1", "-1",
-            "--bounding-box-max", "1", "1", "1"
+            "--bounding-box-max", "1", "1", "1",
         ]
-        
+
         logger.info(f"Running poisson export: {' '.join(poisson_cmd)}")
         subprocess.run(poisson_cmd, check=True, capture_output=True, text=True)
-        
+
         # Look for the exported PLY file
-        ply_files = [f for f in os.listdir(export_dir) if f.endswith('.ply')]
+        ply_files = [f for f in os.listdir(export_dir) if f.endswith(".ply")]
         if not ply_files:
             raise ValueError("No PLY file generated by poisson export")
-        
+
         ply_path = os.path.join(export_dir, ply_files[0])
         logger.info(f"Generated PLY: {ply_path}")
-        
+
         # Convert PLY to GLB using Open3D
         glb_output = os.path.join(export_dir, f"{preview_token}.glb")
-        
+
         import open3d as o3d
-        
-        # Load the PLY mesh
+
         mesh = o3d.io.read_triangle_mesh(ply_path)
-        
         if len(mesh.vertices) == 0:
             raise ValueError("Empty mesh loaded from PLY")
-        
-        logger.info(f"Loaded mesh with {len(mesh.vertices)} vertices and {len(mesh.triangles)} triangles")
-        
+
+        logger.info(
+            f"Loaded mesh with {len(mesh.vertices)} vertices and {len(mesh.triangles)} triangles"
+        )
+
         # Basic mesh cleanup
         mesh.remove_duplicated_vertices()
         mesh.remove_degenerate_triangles()
         mesh.remove_unreferenced_vertices()
-        
-        # Ensure mesh has vertex normals
+
         if not mesh.has_vertex_normals():
             mesh.compute_vertex_normals()
-        
-        # Export to GLB
+
         success = o3d.io.write_triangle_mesh(glb_output, mesh)
-        
         if not success:
             raise ValueError("Failed to write GLB file")
-        
+
         logger.info(f"Successfully exported GLB: {glb_output}")
         return glb_output
-        
+
     except subprocess.CalledProcessError as e:
         logger.error(f"Poisson export failed: {e.stderr}")
         raise ValueError(f"Mesh export failed: {e.stderr}")
@@ -224,69 +270,70 @@ def export_model(output_dir: str, preview_token: str) -> str:
         logger.error(f"Export process failed: {e}")
         raise
 
-def upload_model_to_s3(model_path: str, preview_token: str) -> str:
-    """Upload the generated model to S3 and return public URL"""
+
+def upload_model_to_s3(s3_client, bucket: str, model_path: str, preview_token: str) -> str:
+    """Upload the generated model to S3 and return public URL."""
+    import os
     model_key = f"models/{preview_token}/preview.glb"
-    
+
     logger.info(f"Uploading model to S3: {model_key}")
-    
+
     s3_client.upload_file(
-        model_path, 
-        BUCKET, 
+        model_path,
+        bucket,
         model_key,
-        ExtraArgs={'ContentType': 'model/gltf-binary'}
+        ExtraArgs={"ContentType": "model/gltf-binary"},
     )
-    
-    # Return public URL
-    public_url = f"https://{BUCKET}.{os.environ['S3_ENDPOINT'].split('://')[-1]}/{model_key}"
+
+    public_url = f"https://{bucket}.{os.environ['S3_ENDPOINT'].split('://')[-1]}/{model_key}"
     logger.info(f"Model uploaded: {public_url}")
-    
+
     return public_url
 
-def handler(job):
-    """Main RunPod handler function"""
+# ---------------------------------------------------------------------
+# Your existing queue-style handler (kept intact)
+# ---------------------------------------------------------------------
+def handler(job: dict):
+    """Main pipeline entrypoint (expects job['input'])."""
     logger.info(f"NeRF Worker | Starting job {job.get('id', 'unknown')}")
-    logger.info(f"Job data: {job}")
-    
+    logger.info(f"Job data: {json.dumps(job)[:1000]}")  # cap log length
+
     try:
-        # Extract job parameters
-        job_input = job['input']
-        job_id = job_input.get('job_id')
-        preview_token = job_input.get('preview_token')
-        account = job_input.get('account', 'anon')
-        
+        job_input = job["input"]
+        job_id = job_input.get("job_id")
+        preview_token = job_input.get("preview_token")
+        account = job_input.get("account", "anon")
+
         if not job_id or not preview_token:
             return {"error": "Missing required parameters: job_id and preview_token"}
-        
-        logger.info(f"Processing job_id: {job_id}, preview_token: {preview_token}, account: {account}")
-        
-        # Step 1: Download images from S3
-        logger.info("Step 1: Downloading images from S3...")
-        images_dir = download_images_from_s3(job_id, account)
-        
+
+        # Ensure env present / init s3
+        _require_env()
+        s3_client, bucket = _init_s3()
+
+        logger.info(f"Processing job_id={job_id}, preview_token={preview_token}, account={account}")
+
+        # Step 1: Download images
+        images_dir = download_images_from_s3(s3_client, bucket, job_id, account)
+
         # Step 2: Setup nerfstudio project
-        logger.info("Step 2: Setting up nerfstudio project...")
         project_dir = setup_nerfstudio_project(images_dir)
-        
-        # Step 3: Train NeRF model (preview mode)
-        logger.info("Step 3: Training NeRF model (preview mode)...")
+
+        # Step 3: Train NeRF (preview mode)
         output_dir = train_nerf_model(project_dir, preview_mode=True)
-        
+
         # Step 4: Export model
-        logger.info("Step 4: Exporting model...")
         model_path = export_model(output_dir, preview_token)
-        
-        # Step 5: Upload model to S3
-        logger.info("Step 5: Uploading model to S3...")
-        model_url = upload_model_to_s3(model_path, preview_token)
-        
-        # Clean up temporary directories
-        logger.info("Cleaning up temporary files...")
+
+        # Step 5: Upload model
+        model_url = upload_model_to_s3(s3_client, bucket, model_path, preview_token)
+
+        # Cleanup
         shutil.rmtree(images_dir, ignore_errors=True)
         shutil.rmtree(project_dir, ignore_errors=True)
-        
+
         logger.info(f"Job completed successfully! Model URL: {model_url}")
-        
+
         job_output = {
             "status": "completed",
             "preview_url": model_url,
@@ -295,21 +342,45 @@ def handler(job):
                     {
                         "format": "glb",
                         "url": model_url,
-                        "size_bytes": os.path.getsize(model_path) if os.path.exists(model_path) else 1024000
+                        "size_bytes": os.path.getsize(model_path)
+                        if os.path.exists(model_path)
+                        else 1024000,
                     }
                 ],
-                "processing_time": "preview"
-            }
+                "processing_time": "preview",
+            },
         }
-        
+
         return job_output
-        
+
     except Exception as e:
-        logger.error(f"Job failed with error: {str(e)}")
         import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
+        logger.error(f"Job failed: {e}")
+        logger.error(traceback.format_exc())
         return {"error": str(e)}
 
-# Start the RunPod serverless worker
-logger.info("Starting RunPod serverless worker...")
-runpod.serverless.start({"handler": handler})
+# ---------------------------------------------------------------------
+# FastAPI app (LB ONLY)
+# ---------------------------------------------------------------------
+class GenerateBody(BaseModel):
+    job_id: str
+    preview_token: str
+    account: str | None = "anon"
+
+app = FastAPI(title="NeRF Worker (LB)")
+
+@app.get("/ping")
+def ping():
+    return {"status": "healthy"}
+
+@app.post("/generate")
+def generate(body: GenerateBody):
+    # Wrap LB request into queue-style job for your handler()
+    job = {"id": f"lb-{int(time.time())}", "input": body.model_dump()}
+    result = handler(job)
+    if isinstance(result, dict) and result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+if __name__ == "__main__":
+    uvicorn.run("handler:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")))

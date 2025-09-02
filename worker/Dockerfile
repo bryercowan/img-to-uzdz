@@ -4,7 +4,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# Install system dependencies and COLMAP
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         python3 python3-pip python3-dev \
@@ -18,13 +17,10 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-# Install Python dependencies
 COPY requirements.txt .
-RUN pip3 install --upgrade pip
-RUN pip3 install -r requirements.txt
+RUN python3 -m pip install --upgrade pip && \
+    pip3 install -r requirements.txt
 
-# Copy application code
 COPY handler.py .
 
 CMD ["python3", "-u", "handler.py"]
-
