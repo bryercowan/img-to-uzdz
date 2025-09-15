@@ -6,5 +6,5 @@ pillow
 pillow-heif
 redis
 requests
-runpod
 aiohttp
+python-dotenv

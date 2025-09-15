@@ -4,8 +4,7 @@ from typing import List, Dict, Any
 from pydantic import BaseModel, Field 
 from PIL import Image
 from datetime import datetime
-import boto3, uuid, os, mimetypes, pillow_heif, io, requests, logging, runpod, aiohttp, asyncio
-from runpod import AsyncioEndpoint, AsyncioJob
+import boto3, uuid, os, mimetypes, pillow_heif, io, requests, logging, aiohttp, asyncio
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -46,72 +45,114 @@ RUNPOD_API_KEY = os.environ.get("RUNPOD_API_KEY")
 RUNPOD_ENDPOINT_ID = os.environ.get("RUNPOD_ENDPOINT_ID")
 
 def trigger_runpod_job(job_id: str, preview_token: str, account: str = "anon"):
-    """Trigger RunPod serverless job for 3D model generation"""
+    """Trigger RunPod LB endpoint for 3D model generation"""
     if not RUNPOD_API_KEY or not RUNPOD_ENDPOINT_ID:
-        print("RunPod not configured, using simulation")
+        logger.warning("RunPod not configured, using simulation")
         return None
     
     # Add test mode for development
     if os.environ.get("RUNPOD_TEST_MODE") == "true":
-        print("Running in test mode - simulating successful job")
+        logger.info("Running in test mode - simulating successful job")
         return {"success": True, "job_id": job_id}
     
     try:
-        # Initialize RunPod with API key
-        runpod.api_key = RUNPOD_API_KEY
+        # Construct the LB endpoint URL
+        endpoint_url = f"https://{RUNPOD_ENDPOINT_ID}.api.runpod.ai/generate"
         
-        input_payload = {
+        headers = {
+            "Authorization": f"Bearer {RUNPOD_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        # Payload matching the FastAPI GenerateBody model
+        payload = {
             "job_id": job_id,
             "preview_token": preview_token,
             "account": account
         }
         
-        print(f"Submitting job to RunPod: {input_payload}")
+        logger.info(f"Submitting job to RunPod LB endpoint: {endpoint_url}")
+        logger.info(f"Payload: {payload}")
         
-        # Use synchronous endpoint for serverless
-        endpoint = runpod.Endpoint(RUNPOD_ENDPOINT_ID)
-        run_request = endpoint.run(input_payload)
+        # Send request to LB endpoint
+        response = requests.post(
+            endpoint_url,
+            headers=headers,
+            json=payload,
+            timeout=300  # 5 minute timeout
+        )
         
-        print(f"RunPod run_request created: {type(run_request)}")
-        print(f"Run request object: {run_request}")
+        logger.info(f"RunPod response status: {response.status_code}")
+        logger.info(f"RunPod response headers: {dict(response.headers)}")
         
-        # For serverless, we just need to know the job was submitted successfully
-        # We'll check status later using our own job_id
-        result = {"success": True, "job_id": job_id, "run_request_str": str(run_request)}
-        print(f"RunPod job triggered successfully: {result}")
-        return result
+        if response.status_code == 200:
+            result_data = response.json()
+            logger.info(f"RunPod job completed successfully: {result_data}")
+            return {
+                "success": True,
+                "job_id": job_id,
+                "result": result_data
+            }
+        else:
+            error_msg = response.json() if response.headers.get('content-type') == 'application/json' else response.text
+            logger.error(f"RunPod job failed with status {response.status_code}: {error_msg}")
+            return {
+                "success": False,
+                "job_id": job_id,
+                "error": error_msg
+            }
         
+    except requests.exceptions.Timeout:
+        logger.error("RunPod request timed out after 5 minutes")
+        return {"success": False, "job_id": job_id, "error": "Request timed out"}
     except Exception as e:
-        print(f"Failed to trigger RunPod job: {e}")
-        print(f"Exception type: {type(e)}")
+        logger.error(f"Failed to trigger RunPod job: {e}")
         import traceback
-        print(f"Traceback: {traceback.format_exc()}")
-        return None
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return {"success": False, "job_id": job_id, "error": str(e)}
 
-def check_runpod_status(runpod_job_id: str):
-    """Check the status of a RunPod job"""
-    if not RUNPOD_API_KEY:
-        return None
-    
+def check_runpod_status(preview_token: str):
+    """Check if RunPod job result is ready (stored in preview_store)"""
+    # Since LB endpoints are synchronous, we store the result immediately
+    # This function checks if we have the result stored
+    if preview_token in preview_store:
+        preview = preview_store[preview_token]
+        if "result" in preview:
+            return {"status": "COMPLETED", "result": preview["result"]}
+        elif preview.get("error"):
+            return {"status": "FAILED", "error": preview.get("error")}
+    return {"status": "PROCESSING"}
+
+async def process_runpod_job(job_id: str, preview_token: str, account: str):
+    """Process RunPod job asynchronously"""
+    logger.info(f"Starting async RunPod job processing for job_id={job_id}, preview_token={preview_token}")
     try:
-        # Initialize RunPod with API key
-        runpod.api_key = RUNPOD_API_KEY
+        # Run the synchronous RunPod call in a thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, trigger_runpod_job, job_id, preview_token, account)
         
-        # Use synchronous endpoint for serverless
-        endpoint = runpod.Endpoint(RUNPOD_ENDPOINT_ID)
+        logger.info(f"RunPod job result for {preview_token}: {result}")
         
-        # Create a job object from the job ID (this might need adjustment based on SDK)
-        # For now, let's try to get status using the endpoint
-        # Note: We might need to store the run_request object instead of just the ID
-        
-        # Try to check status - this might need to be adjusted based on actual SDK
-        # For now, return a placeholder
-        return {"status": "IN_PROGRESS"}
-        
+        # Update the preview store with the result
+        if preview_token in preview_store:
+            if result and result.get("success"):
+                preview_store[preview_token]["runpod_success"] = True
+                if "result" in result:
+                    preview_store[preview_token]["result"] = result["result"]
+                preview_store[preview_token]["completed_at"] = datetime.utcnow()
+                logger.info(f"RunPod job {preview_token} completed successfully")
+            else:
+                error_msg = result.get("error", "Unknown error") if result else "Failed to connect to RunPod"
+                preview_store[preview_token]["error"] = error_msg
+                preview_store[preview_token]["completed_at"] = datetime.utcnow()
+                logger.error(f"RunPod job {preview_token} failed: {error_msg}")
     except Exception as e:
-        print(f"Failed to check RunPod status: {e}")
-        return None
-
+        logger.error(f"Error processing RunPod job {preview_token}: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        if preview_token in preview_store:
+            preview_store[preview_token]["error"] = str(e)
+            preview_store[preview_token]["completed_at"] = datetime.utcnow()
 
 @app.post("/uploads/presign")
 async def presign(req: PreReq):
@@ -170,17 +211,17 @@ async def preview_job(request: Dict[str, Any]):
     if not job_id:
         raise HTTPException(400, "job_id is required")
     
-    # Trigger RunPod job
-    runpod_result = trigger_runpod_job(job_id, preview_token, account)
-    
     # Store the preview with initial status
     preview_store[preview_token] = {
         "status": "processing",
         "created_at": datetime.utcnow(),
         "images": request.get("images", []),
         "job_id": job_id,
-        "runpod_success": runpod_result.get("success") if runpod_result else False
+        "runpod_success": False
     }
+    
+    # Trigger RunPod job asynchronously to avoid blocking
+    asyncio.create_task(process_runpod_job(job_id, preview_token, account))
 
     return {
         "ok": True,
@@ -198,24 +239,34 @@ async def get_preview_status(preview_token: str):
         raise HTTPException(status_code=404, detail="Preview not found")
     
     preview = preview_store[preview_token]
-    runpod_success = preview.get("runpod_success", False)
-    job_id = preview.get("job_id")
     
     # If RunPod is not configured, return error
     if not RUNPOD_API_KEY or not RUNPOD_ENDPOINT_ID:
         raise HTTPException(status_code=503, detail="RunPod worker not configured")
     
-    # If RunPod job submission failed, return error
-    if not runpod_success:
+    # Check if we have a result or error
+    if "result" in preview:
+        result = preview["result"]
+        if result.get("preview_url"):
+            return {
+                "preview_token": preview_token,
+                "status": "completed",
+                "created_at": preview["created_at"].isoformat(),
+                "completed_at": preview.get("completed_at", datetime.utcnow()).isoformat(),
+                "preview_url": result["preview_url"],
+                "preview_data": result.get("preview_data", {})
+            }
+    
+    if preview.get("error"):
         return {
             "preview_token": preview_token,
             "status": "failed",
             "created_at": preview["created_at"].isoformat(),
             "completed_at": datetime.utcnow().isoformat(),
-            "errors": ["Failed to start processing job"]
+            "errors": [preview.get("error", "Processing failed")]
         }
     
-    # For now, return processing status (we'll implement proper status checking next)
+    # Still processing
     return {
         "preview_token": preview_token,
         "status": "processing",
