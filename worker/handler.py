@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-RunPod serverless worker for NeRF generation
+RunPod LB worker with FastAPI
 """
 
 import os
 import json
+import time
 import tempfile
 import subprocess
 import shutil
@@ -13,6 +14,10 @@ from pathlib import Path
 
 import boto3
 import runpod
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import uvicorn
 
 # ---------------------------------------------------------------------
 # Logging
@@ -286,16 +291,17 @@ def upload_model_to_s3(s3_client, bucket: str, model_path: str, preview_token: s
 # ---------------------------------------------------------------------
 # Your existing queue-style handler (kept intact)
 # ---------------------------------------------------------------------
-def handler(event: dict):
-    """RunPod serverless handler - main entrypoint"""
-    logger.info(f"NeRF Worker | Starting job")
-    logger.info(f"Event data: {json.dumps(event)[:1000]}")  # cap log length
+def handler(job: dict):
+    """Main pipeline handler"""
+    logger.info(f"NeRF Worker | Starting job {job.get('id', 'unknown')}")
+    logger.info(f"Job data: {json.dumps(job)[:1000]}")  # cap log length
 
     try:
-        # RunPod passes input directly in the event for serverless
-        job_id = event.get("job_id")
-        preview_token = event.get("preview_token")
-        account = event.get("account", "anon")
+        # Extract input from job wrapper
+        job_input = job.get("input", {})
+        job_id = job_input.get("job_id")
+        preview_token = job_input.get("preview_token")
+        account = job_input.get("account", "anon")
 
         if not job_id or not preview_token:
             return {"error": "Missing required parameters: job_id and preview_token"}
@@ -352,6 +358,26 @@ def handler(event: dict):
         logger.error(traceback.format_exc())
         return {"error": str(e)}
 
-# RunPod serverless entrypoint
+# FastAPI app for LB endpoints
+class GenerateBody(BaseModel):
+    job_id: str
+    preview_token: str
+    account: str | None = "anon"
+
+app = FastAPI(title="NeRF Worker (LB)")
+
+@app.get("/ping")
+def ping():
+    return {"status": "healthy"}
+
+@app.post("/generate")
+def generate(body: GenerateBody):
+    # Wrap LB request into job format for handler
+    job = {"id": f"lb-{int(time.time())}", "input": body.model_dump()}
+    result = handler(job)
+    if isinstance(result, dict) and result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
 if __name__ == "__main__":
-    runpod.serverless.start({"handler": handler})
+    uvicorn.run("handler:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
