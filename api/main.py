@@ -56,7 +56,7 @@ def trigger_runpod_job(job_id: str, preview_token: str, account: str = "anon"):
         return {"success": True, "job_id": job_id}
     
     try:
-        # Construct the LB endpoint URL
+        # For LB endpoints, use the direct endpoint URL
         endpoint_url = f"https://{RUNPOD_ENDPOINT_ID}.api.runpod.ai/generate"
         
         headers = {
@@ -64,7 +64,7 @@ def trigger_runpod_job(job_id: str, preview_token: str, account: str = "anon"):
             "Content-Type": "application/json"
         }
         
-        # Payload matching the FastAPI GenerateBody model
+        # LB endpoint expects the payload directly
         payload = {
             "job_id": job_id,
             "preview_token": preview_token,
@@ -74,15 +74,34 @@ def trigger_runpod_job(job_id: str, preview_token: str, account: str = "anon"):
         logger.info(f"Submitting job to RunPod LB endpoint: {endpoint_url}")
         logger.info(f"Payload: {payload}")
         
-        # Send request to LB endpoint
-        response = requests.post(
-            endpoint_url,
-            headers=headers,
-            json=payload,
-            timeout=300  # 5 minute timeout
-        )
+        # Retry logic for worker initialization
+        max_retries = 5
+        retry_delay = 30  # seconds - give workers time to spin up
         
-        logger.info(f"RunPod response status: {response.status_code}")
+        for attempt in range(1, max_retries + 1):
+            logger.info(f"Attempt {attempt}/{max_retries} to call RunPod...")
+            
+            response = requests.post(
+                endpoint_url,
+                headers=headers,
+                json=payload,
+                timeout=300  # 5 minute timeout
+            )
+            
+            logger.info(f"RunPod response status: {response.status_code}")
+            
+            # If we get "no workers available", retry
+            if response.status_code == 430:
+                error_data = response.json() if response.headers.get('content-type') == 'application/json' else response.text
+                if "no workers available" in str(error_data) and attempt < max_retries:
+                    logger.warning(f"No workers available, retrying in {retry_delay} seconds...")
+                    import time
+                    time.sleep(retry_delay)
+                    continue
+            
+            # For any other response, break out of retry loop
+            break
+        
         logger.info(f"RunPod response headers: {dict(response.headers)}")
         
         if response.status_code == 200:

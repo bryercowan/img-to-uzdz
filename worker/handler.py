@@ -23,8 +23,15 @@ import uvicorn
 # Logging
 # ---------------------------------------------------------------------
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
+# Force logging to stdout so RunPod captures it
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[logging.StreamHandler()],
+    force=True
+)
 logger = logging.getLogger(__name__)
+logger.setLevel(LOG_LEVEL)
 
 # ---------------------------------------------------------------------
 # Env + S3
@@ -56,7 +63,7 @@ def download_images_from_s3(s3_client, bucket: str, job_id: str, account: str = 
     temp_dir = tempfile.mkdtemp()
     prefix = f"raw/{account}/{job_id}/"
 
-    logger.info(f"Downloading images from S3 with prefix: {prefix}")
+    print(f"Downloading images from S3 with prefix: {prefix}", flush=True)
 
     response = s3_client.list_objects_v2(Bucket=bucket, Prefix=prefix)
 
@@ -70,12 +77,12 @@ def download_images_from_s3(s3_client, bucket: str, job_id: str, account: str = 
             local_path = os.path.join(temp_dir, os.path.basename(key))
             s3_client.download_file(bucket, key, local_path)
             image_count += 1
-            logger.info(f"Downloaded: {key} -> {local_path}")
+            print(f"Downloaded: {key} -> {local_path}", flush=True)
 
     if image_count == 0:
         raise ValueError(f"No image files (.jpg/.jpeg/.png/.webp) found under {prefix}")
 
-    logger.info(f"Downloaded {image_count} images to {temp_dir}")
+    print(f"Downloaded {image_count} images to {temp_dir}", flush=True)
     return temp_dir
 
 
@@ -83,7 +90,7 @@ def setup_nerfstudio_project(images_dir: str) -> str:
     """Setup nerfstudio project with COLMAP processing."""
     import os
     project_dir = tempfile.mkdtemp()
-    logger.info(f"Setting up nerfstudio project in {project_dir}")
+    print(f"Setting up nerfstudio project in {project_dir}", flush=True)
 
     # Create nerfstudio data directory structure
     data_dir = os.path.join(project_dir, "data")
@@ -94,7 +101,7 @@ def setup_nerfstudio_project(images_dir: str) -> str:
     shutil.copytree(images_dir, images_output)
 
     # Run COLMAP feature extraction and matching
-    logger.info("Running COLMAP processing...")
+    print("Running COLMAP processing...", flush=True)
 
     # COLMAP automatic reconstruction
     cmd = [
@@ -106,11 +113,11 @@ def setup_nerfstudio_project(images_dir: str) -> str:
 
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
-        logger.info("COLMAP processing completed successfully")
+        print("COLMAP processing completed successfully", flush=True)
     except subprocess.CalledProcessError as e:
-        logger.error(f"COLMAP failed: {e.stderr}")
+        print(f"ERROR: COLMAP failed: {e.stderr}", flush=True)
         # Fallback: use simpler COLMAP processing
-        logger.info("Attempting simplified COLMAP processing...")
+        print("Attempting simplified COLMAP processing...", flush=True)
 
         sparse_dir = os.path.join(data_dir, "sparse")
         os.makedirs(sparse_dir, exist_ok=True)
@@ -151,7 +158,7 @@ def setup_nerfstudio_project(images_dir: str) -> str:
 def train_nerf_model(project_dir: str, preview_mode: bool = True) -> str:
     """Train NeRF model using nerfstudio."""
     import os
-    logger.info("Starting NeRF training...")
+    print("Starting NeRF training...", flush=True)
 
     data_dir = os.path.join(project_dir, "data")
     output_dir = os.path.join(project_dir, "outputs")
@@ -186,7 +193,7 @@ def train_nerf_model(project_dir: str, preview_mode: bool = True) -> str:
             ]
         )
 
-    logger.info(f"Running: {' '.join(train_cmd)}")
+    print(f"Running: {' '.join(train_cmd)}", flush=True)
     subprocess.run(train_cmd, check=True)
 
     return output_dir
@@ -195,7 +202,7 @@ def train_nerf_model(project_dir: str, preview_mode: bool = True) -> str:
 def export_model(output_dir: str, preview_token: str) -> str:
     """Export trained NeRF to GLB format using nerfstudio + Open3D."""
     import os
-    logger.info("Exporting NeRF model to GLB...")
+    print("Exporting NeRF model to GLB...", flush=True)
 
     # Find the latest experiment
     experiments = [d for d in os.listdir(output_dir) if d.startswith("nerfacto")]
@@ -207,7 +214,7 @@ def export_model(output_dir: str, preview_token: str) -> str:
     export_dir = os.path.join(output_dir, "exports")
     os.makedirs(export_dir, exist_ok=True)
 
-    logger.info(f"Using config: {config_path}")
+    print(f"Using config: {config_path}", flush=True)
 
     try:
         # Export to mesh using nerfstudio's poisson export
@@ -222,7 +229,7 @@ def export_model(output_dir: str, preview_token: str) -> str:
             "--bounding-box-max", "1", "1", "1",
         ]
 
-        logger.info(f"Running poisson export: {' '.join(poisson_cmd)}")
+        print(f"Running poisson export: {' '.join(poisson_cmd)}", flush=True)
         subprocess.run(poisson_cmd, check=True, capture_output=True, text=True)
 
         # Look for the exported PLY file
@@ -231,7 +238,7 @@ def export_model(output_dir: str, preview_token: str) -> str:
             raise ValueError("No PLY file generated by poisson export")
 
         ply_path = os.path.join(export_dir, ply_files[0])
-        logger.info(f"Generated PLY: {ply_path}")
+        print(f"Generated PLY: {ply_path}", flush=True)
 
         # Convert PLY to GLB using Open3D
         glb_output = os.path.join(export_dir, f"{preview_token}.glb")
@@ -242,7 +249,7 @@ def export_model(output_dir: str, preview_token: str) -> str:
         if len(mesh.vertices) == 0:
             raise ValueError("Empty mesh loaded from PLY")
 
-        logger.info(
+        print(
             f"Loaded mesh with {len(mesh.vertices)} vertices and {len(mesh.triangles)} triangles"
         )
 
@@ -258,14 +265,14 @@ def export_model(output_dir: str, preview_token: str) -> str:
         if not success:
             raise ValueError("Failed to write GLB file")
 
-        logger.info(f"Successfully exported GLB: {glb_output}")
+        print(f"Successfully exported GLB: {glb_output}")
         return glb_output
 
     except subprocess.CalledProcessError as e:
-        logger.error(f"Poisson export failed: {e.stderr}")
+        print(f"ERROR: Poisson export failed: {e.stderr}", flush=True)
         raise ValueError(f"Mesh export failed: {e.stderr}")
     except Exception as e:
-        logger.error(f"Export process failed: {e}")
+        print(f"ERROR: Export process failed: {e}", flush=True)
         raise
 
 
@@ -274,7 +281,7 @@ def upload_model_to_s3(s3_client, bucket: str, model_path: str, preview_token: s
     import os
     model_key = f"models/{preview_token}/preview.glb"
 
-    logger.info(f"Uploading model to S3: {model_key}")
+    print(f"Uploading model to S3: {model_key}", flush=True)
 
     s3_client.upload_file(
         model_path,
@@ -284,7 +291,7 @@ def upload_model_to_s3(s3_client, bucket: str, model_path: str, preview_token: s
     )
 
     public_url = f"https://{bucket}.{os.environ['S3_ENDPOINT'].split('://')[-1]}/{model_key}"
-    logger.info(f"Model uploaded: {public_url}")
+    print(f"Model uploaded: {public_url}", flush=True)
 
     return public_url
 
@@ -293,8 +300,8 @@ def upload_model_to_s3(s3_client, bucket: str, model_path: str, preview_token: s
 # ---------------------------------------------------------------------
 def handler(job: dict):
     """Main pipeline handler"""
-    logger.info(f"NeRF Worker | Starting job {job.get('id', 'unknown')}")
-    logger.info(f"Job data: {json.dumps(job)[:1000]}")  # cap log length
+    print(f"NeRF Worker | Starting job {job.get('id', 'unknown')}", flush=True)
+    print(f"Job data: {json.dumps(job)[:1000]}", flush=True)  # cap log length
 
     try:
         # Extract input from job wrapper
@@ -310,7 +317,7 @@ def handler(job: dict):
         _require_env()
         s3_client, bucket = _init_s3()
 
-        logger.info(f"Processing job_id={job_id}, preview_token={preview_token}, account={account}")
+        print(f"Processing job_id={job_id}, preview_token={preview_token}, account={account}")
 
         # Step 1: Download images
         images_dir = download_images_from_s3(s3_client, bucket, job_id, account)
@@ -331,7 +338,7 @@ def handler(job: dict):
         shutil.rmtree(images_dir, ignore_errors=True)
         shutil.rmtree(project_dir, ignore_errors=True)
 
-        logger.info(f"Job completed successfully! Model URL: {model_url}")
+        print(f"Job completed successfully! Model URL: {model_url}")
 
         job_output = {
             "status": "completed",
@@ -354,8 +361,8 @@ def handler(job: dict):
 
     except Exception as e:
         import traceback
-        logger.error(f"Job failed: {e}")
-        logger.error(traceback.format_exc())
+        print(f"ERROR: Job failed: {e}", flush=True)
+        print(f"Traceback: {traceback.format_exc()}", flush=True)
         return {"error": str(e)}
 
 # FastAPI app for LB endpoints
@@ -368,10 +375,12 @@ app = FastAPI(title="NeRF Worker (LB)")
 
 @app.get("/ping")
 def ping():
+    print("PING received", flush=True)
     return {"status": "healthy"}
 
 @app.post("/generate")
 def generate(body: GenerateBody):
+    print(f"GENERATE endpoint called with: {body.model_dump()}", flush=True)
     # Wrap LB request into job format for handler
     job = {"id": f"lb-{int(time.time())}", "input": body.model_dump()}
     result = handler(job)
